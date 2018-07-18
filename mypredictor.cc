@@ -3,9 +3,8 @@
 #include "mypredictor.h"
 #include <cassert>
 #include <cstdio>
-using namespace std;
 
-static DFCM_Predictor predictor;
+static MyFCMPredictor predictor;
 
 // Global branch and path history
 static uint64_t ghr = 0, phist = 0;
@@ -13,53 +12,21 @@ static uint64_t ghr = 0, phist = 0;
 // Load/Store address history
 static uint64_t addrHist = 0;
 
-// the gash function is the Shift-Xor hash function
-uint64_t gash(uint64_t a , uint64_t b, uint64_t c, uint64_t d)
-{
-	uint64_t output = 0;
-	output ^= a;
-	output ^= (b>>1);
-	output ^= (c>>2);
-	output ^= (d>>3);
-	return output;
-	
-}
-
 bool getPrediction(uint64_t seq_no, uint64_t pc, uint8_t piece, uint64_t& predicted_value) {
-
   
-  // Calculating the index.
+  // Accessing the first table. A different entry will be accessed for each piece.
   // Instructions are 4-bytes, so shift PC by 2.
-  uint64_t index = ((pc >> 2) ^ piece) & predictor.indexMask;
-
-
-
-  // Accessing the lastValue, strideList, tag from the Level_1_Table.
-  deque<uint64_t> strideList = predictor.Level_1_Table[index].strideList;
-  uint64_t lastValue = predictor.Level_1_Table[index].lastValue;
+  uint64_t firstLevelIndex = ((pc >> 2) ^ piece) & predictor.firstLevelMask;
   
+  // Accessing the second level table. Note that both tables are the same size so we are using the same mask.
+  uint64_t secondLevelIndex = predictor.firstLevelTable[firstLevelIndex].predictTimeIndex & predictor.firstLevelMask;
   
-  uint64_t a=strideList[0] & predictor.indexMask;
-  uint64_t b=strideList[1] & predictor.indexMask;
-  uint64_t c=strideList[2] & predictor.indexMask;
-  uint64_t d=strideList[3] & predictor.indexMask;
-
-  
-  // Calculating the stride_index using the gash function
-  uint64_t stride_index = gash(a,b,c,d) & predictor.indexMask;
-
-
-  //Accessing the stride from the stride_Table
-  uint64_t stride = predictor.Level_2_Table[stride_index].stride;
-
-  predicted_value = lastValue + stride;
-  uint8_t use_pred = (predictor.Level_2_Table[stride_index].conf >=7);
+  predictor.lastPrediction = predicted_value = predictor.secondLevelTable[secondLevelIndex].pred;
+  uint8_t confidence = predictor.secondLevelTable[secondLevelIndex].conf;
   
   // Speculate using the prediction only if confidence is high enough
-  return use_pred;
+  return confidence >= 15;
 }
-
-
 
 void speculativeUpdate(uint64_t seq_no,    		// dynamic micro-instruction # (starts at 0 and increments indefinitely)
                        bool eligible,			// true: instruction is eligible for value prediction. false: not eligible.
@@ -75,38 +42,25 @@ void speculativeUpdate(uint64_t seq_no,    		// dynamic micro-instruction # (sta
 		       uint64_t src1,
 		       uint64_t src2,
 		       uint64_t src3,
-		       uint64_t dst) { 
-
-  // we will attempt to predict ALU/LOAD/SLOWALU 
+		       uint64_t dst) {
+  // In this example, we will only attempt to predict ALU/LOAD/SLOWALU 
   bool isPredictable = insn == aluInstClass || insn == loadInstClass || insn == slowAluInstClass;
  
-  // index is calulated and strideList is accessed.
-  uint64_t index = ((pc >> 2) ^ piece) & predictor.indexMask;
-  deque<uint64_t> strideList = predictor.Level_1_Table[index].strideList;
-
-
-  uint64_t a=strideList[0] & predictor.indexMask;
-  uint64_t b=strideList[1] & predictor.indexMask;
-  uint64_t c=strideList[2] & predictor.indexMask;
-  uint64_t d=strideList[3] & predictor.indexMask;
-
   
-  // Calculating the stride_index using the gash function
-  uint64_t stride_index = gash(a,b,c,d) & predictor.indexMask;
-
-
- if(isPredictable)
+  uint64_t firstLevelIndex = ((pc >> 2) ^ piece) & predictor.firstLevelMask;
+  uint64_t secondLevelIndex = predictor.firstLevelTable[firstLevelIndex].predictTimeIndex & predictor.firstLevelMask;
+	
+  // It's an instruction we are interested in predicting, update the first table history
+  // Note that some other type of predictors may not want to update at this time if the
+  // prediction is unknown to be correct or incorrect
+  if(isPredictable)
   {
-
-	 // pusihng the instruction's inflightInfo into InflightPreds.
-	 // increasing the inflight number for the given PC to indicate 
-	 // one more instruction inflight which is yet to be committed.
-	predictor.inflightPreds.push_front({seq_no, index, stride_index});
-	predictor.Level_1_Table[index].inflight++;
-    
+	predictor.inflightPreds.push_front({seq_no, firstLevelIndex, secondLevelIndex});
+	predictor.firstLevelTable[firstLevelIndex].inflight++;
+    uint64_t result = predictor.lastPrediction; 
+    predictor.firstLevelTable[firstLevelIndex].predictTimeIndex ^= result;
 	return;
   }
-
   
   // At this point, any branch-related information is architectural, i.e.,
   // updating the GHR/LHRs is safe.
@@ -122,58 +76,50 @@ void speculativeUpdate(uint64_t seq_no,    		// dynamic micro-instruction # (sta
 	phist = (phist << 4) | (next_pc & 0x3);
 }
 
-
-
 void updatePredictor(uint64_t seq_no,		// dynamic micro-instruction #
 		     uint64_t actual_addr,	// load or store address (0xdeadbeef if not a load or store instruction)
 		     uint64_t actual_value,	// value of destination register (0xdeadbeef if instr. is not eligible for value prediction)
-		     uint64_t actual_latency) {//{}	// actual execution latency of instruction
+		     uint64_t actual_latency) {	// actual execution latency of instruction
 
-  std::deque<DFCM_Predictor::InflightInfo> & inflight = predictor.inflightPreds;
+  std::deque<MyFCMPredictor::InflightInfo> & inflight = predictor.inflightPreds;
 
   // If we have value predictions waiting for corresponding update
   if(inflight.size() && seq_no == inflight.back().seqNum)
-  {     
-   
-	uint64_t new_stride =   actual_value - predictor.Level_1_Table[inflight.back().index].lastValue; 
-	
+  {  	   
+    // It is now safe to update the FCM value history
+    predictor.firstLevelTable[inflight.back().firstLevelIndex].commitTimeIndex ^= actual_value;
+	uint64_t commitTimeSecondLevelIndex = 
+	  predictor.firstLevelTable[inflight.back().firstLevelIndex].commitTimeIndex & predictor.firstLevelMask;
+  
     // If there are not other predictions corresponding to this PC in flight in the pipeline, 
-    // we make sure the DFCM stride history used to predict is clean by copying the architectural value
+    // we make sure the FCM value history used to predict is clean by copying the architectural value
     // history in it.
-
-    if(--predictor.Level_1_Table[inflight.back().index].inflight == 0)
+    // Speculative FCM value history can become state when it is updated in speculativeUpdate() with a prediction
+    // that we don't know the outcome of yet, because it was not used to speculate.
+    if(--predictor.firstLevelTable[inflight.back().firstLevelIndex].inflight == 0)
     {
-		predictor.Level_1_Table[inflight.back().index].strideList.pop_back();	
-		predictor.Level_1_Table[inflight.back().index].strideList.push_front(predictor.Level_1_Table[inflight.back().index].lastValue);	
-		predictor.Level_1_Table[inflight.back().index].lastValue = actual_value;
+      predictor.firstLevelTable[inflight.back().firstLevelIndex].predictTimeIndex = 
+        predictor.firstLevelTable[inflight.back().firstLevelIndex].commitTimeIndex;
     }
-
-	// If the predicted stride is equal to new stride , increase confidence.
-    if(predictor.Level_2_Table[inflight.back().stride_Index].stride == new_stride)
+  
+    if(predictor.secondLevelTable[commitTimeSecondLevelIndex].pred == actual_value)
 	{
-	     predictor.Level_2_Table[inflight.back().stride_Index].conf = 
-	     std::min(predictor.Level_2_Table[inflight.back().stride_Index].conf + 1,10);
+	     predictor.secondLevelTable[commitTimeSecondLevelIndex].conf = 
+	       std::min(predictor.secondLevelTable[commitTimeSecondLevelIndex].conf + 1, 15);
     }
-
-	// if confidence is zero ,change the stride value in the predictor to new_stride.
-    else if(predictor.Level_2_Table[inflight.back().stride_Index].conf == 0)
-      predictor.Level_2_Table[inflight.back().stride_Index].stride = new_stride;
-
-	// If prediction was wrong ,but confidence is not zero , then decrease confidence.
+    else if(predictor.secondLevelTable[commitTimeSecondLevelIndex].conf == 0)
+      predictor.secondLevelTable[commitTimeSecondLevelIndex].pred = actual_value;
     else
-      predictor.Level_2_Table[inflight.back().stride_Index].conf--;
+      predictor.secondLevelTable[commitTimeSecondLevelIndex].conf = 0;
 		
     inflight.pop_back();
   }
-
-
 
   // It is now safe to update the address history register
   //if(insn == loadInstClass || insn == storeInstClass) 
   if(actual_addr != 0xdeadbeef)
    addrHist = (addrHist << 4) | actual_addr;
 }
-
 
 void beginPredictor(int argc_other, char **argv_other) {
    if (argc_other > 0)
