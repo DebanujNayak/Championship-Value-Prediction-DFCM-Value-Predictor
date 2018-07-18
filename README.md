@@ -1,1 +1,224 @@
 # Championship-Value-Prediction-DFCM-Value-Predictor
+
+% Championship Value Prediction 1 Infrastructure v5 w/o boost dependency
+% For questions, please email aperais@qti.qualcomm.com or ralsheik@qti.qualcomm.com
+
+% === Overview ===
+% Reads instructions from a trace in binary format.
+% TRACES FROM CVP1 WEBSITE SHOULD BE UNZIPPED BEFORE RUNNING
+% One instruction from the trace may generate several "pieces" that contestants will have the opportunity to predict.
+% The number of pieces depend on the number of 64-bit output values. 
+%   For instance :
+%   1. A vector instruction that writes 128-bit registers will cause two pieces to be generated.
+%   2. A scalar instruction that produces two general purpose registers will cause two pieces to be generated.
+%   3. A vector instruction that writes 2 128-bit registers will cause four pieces to be generated.
+%   In general, however, instructions from the trace will only generate a single piece.
+%
+% Schedule instructions according to the dataflow as well as structural constraints (ROB size and superscalar width).
+% Report overall cycle count.
+%
+% v2 changelog :
+% 1. Added memory hierarchy (L1/L2/L3)
+%
+% v3 changelog :
+% 1. Fixed assertions in infrastructure.
+% 2. Added different latency (SlowAlu 4 cycles, FP 3 cycles, all other 1 cycle)
+% 
+% v4 changelog : 
+% 1. Added beginPredictor() and endPredictor() to allow contestants to initialize/finalize state at simulation beginning and end (see cvp.h).
+% 2. Fix "piece handling" code and removed temporary snippet in mypredictor.cc. Infrastructure reports the correct number.
+%
+% v5 changelog
+% 1. Fix VP coverage reporting where predicting a non-predictable instruction would contribute toward correct predictions (now ignored).
+% 2. Switch to Write-allocate policy for stores missing L1 to prevent outlier behavior due to stores leaving the window early due to VP, 
+%    preventing subsequent load from forwarding (instead they would miss the L1 and see increased latency vs. the baseline).
+
+
+% === COMPILING ===
+% A Makefile is provided to compile the infrastructure.
+% Note that the simulator uses boost to stream from compressed traces directly.
+% Therefore, please make sure that the boost_iostreams library is present on your system.
+% If not, please :
+% 1 - Download latest version of boost https://dl.bintray.com/boostorg/release/1.66.0/source/
+% 2 - Follow instructions at http://www.boost.org/doc/libs/1_66_0/more/getting_started/unix-variants.html :
+%     a. Issue the following commands in the shell (don't type $; that represents the shell's prompt):
+%        cd path/to/boost_1_66_0
+%        ./bootstrap.sh --help
+%     b. Select your configuration options and invoke ./bootstrap.sh again without the --help option. 
+%        Unless you have write permission in your system's /usr/local/ directory, you'll probably want to at least use
+%        ./bootstrap.sh --prefix=path/to/installation/prefix to install somewhere else. Also, consider using the --show-libraries 
+%        and --with-libraries=library-name-list options to limit the long wait you'll experience if you build everything. Finally,
+%        FOR CVP, you only need :
+%        ./bootstrap.sh --prefix=/path/to/myboost --with-libraries=iostreams
+%     C. ./b2 install
+%         will leave Boost binaries in the lib/ subdirectory of your installation prefix. You will also find a copy of the Boost headers 
+%         in the include/ subdirectory of the installation prefix, so you can henceforth use that directory as an #include path in place 
+%         of the Boost root directory.
+% 3 - If you did install boost at a non-standard location, please edit the Makefile with -L /path/to/myboost/lib
+%     We also advise to compile with -static in that case, to avoid needing to set LD_LIBRARY_PRELOAD to point to 
+%     libboost_iostreads.so when launching the simulator.
+
+% === RUNNING ===
+% ./cvp compute_int_0 > base.out
+
+100000 instrs 
+200000 instrs 
+300000 instrs 
+...
+30000000 instrs 
+UARCHSIM CONFIGURATION-----------------------------
+VP_ENABLE = 0
+VP_PERFECT = n/a
+WINDOW_SIZE = 256
+FETCH_WIDTH = 16
+MEMORY HIERARCHY CONFIGURATION---------------------
+PERFECT_CACHE = 0
+WRITE_ALLOCATE = 1
+Within-pipeline factors:
+	AGEN latency = 1 cycle
+	Store Queue (SQ): SQ size = window size, oracle memory disambiguation, store-load forwarding = 1 cycle after store's or load's agen.
+	* Note: A store searches the L1$ at commit. The store is released
+	* from the SQ and window, whether it hits or misses. Store misses
+	* are buffered until the block is allocated and the store is
+	* performed in the L1$. While buffered, conflicting loads get
+	* the store's data as they would from the SQ.
+L1$: 32 KB, 4-way set-assoc., 64B block size, 2-cycle search latency
+L2$: 1 MB, 8-way set-assoc., 64B block size, 12-cycle search latency
+L3$: 8 MB, 16-way set-assoc., 128B block size, 60-cycle search latency
+Main Memory: 150-cycle fixed search time
+STORE QUEUE MEASUREMENTS---------------------------
+Number of loads: 8376300
+Number of loads that miss in SQ: 7444593 (88.88%)
+MEMORY HIERARCHY MEASUREMENTS----------------------
+L1$:
+	accesses   = 12940396
+	misses     = 150886
+	miss ratio = 1.17%
+L2$:
+	accesses   = 150886
+	misses     = 54365
+	miss ratio = 36.03%
+L3$:
+	accesses   = 54365
+	misses     = 10325
+	miss ratio = 18.99%
+ILP LIMIT STUDY------------------------------------
+instructions = 30700423
+cycles       = 2345679
+IPC          = 13.09
+CVP STUDY------------------------------------------
+prediction-eligible instructions = 20379268
+correct predictions              = 0 (0.00%)
+incorrect predictions            = 0 (0.00%)
+ Read 30003200 instrs 
+
+
+
+
+% ./cvp -v -p compute_int_0 > perfvp.out
+
+100000 instrs 
+200000 instrs 
+300000 instrs 
+...
+30000000 instrs 
+UARCHSIM CONFIGURATION-----------------------------
+VP_ENABLE = 1
+VP_PERFECT = 1
+WINDOW_SIZE = 256
+FETCH_WIDTH = 16
+MEMORY HIERARCHY CONFIGURATION---------------------
+PERFECT_CACHE = 0
+WRITE_ALLOCATE = 1
+Within-pipeline factors:
+	AGEN latency = 1 cycle
+	Store Queue (SQ): SQ size = window size, oracle memory disambiguation, store-load forwarding = 1 cycle after store's or load's agen.
+	* Note: A store searches the L1$ at commit. The store is released
+	* from the SQ and window, whether it hits or misses. Store misses
+	* are buffered until the block is allocated and the store is
+	* performed in the L1$. While buffered, conflicting loads get
+	* the store's data as they would from the SQ.
+L1$: 32 KB, 4-way set-assoc., 64B block size, 2-cycle search latency
+L2$: 1 MB, 8-way set-assoc., 64B block size, 12-cycle search latency
+L3$: 8 MB, 16-way set-assoc., 128B block size, 60-cycle search latency
+Main Memory: 150-cycle fixed search time
+STORE QUEUE MEASUREMENTS---------------------------
+Number of loads: 8376300
+Number of loads that miss in SQ: 7710981 (92.06%)
+MEMORY HIERARCHY MEASUREMENTS----------------------
+L1$:
+	accesses   = 12940396
+	misses     = 150886
+	miss ratio = 1.17%
+L2$:
+	accesses   = 150886
+	misses     = 54365
+	miss ratio = 36.03%
+L3$:
+	accesses   = 54365
+	misses     = 10325
+	miss ratio = 18.99%
+ILP LIMIT STUDY------------------------------------
+instructions = 30700423
+cycles       = 2016147
+IPC          = 15.23
+CVP STUDY------------------------------------------
+prediction-eligible instructions = 20379268
+correct predictions              = 20379268 (100.00%)
+incorrect predictions            = 0 (0.00%)
+ Read 30003200 instrs 
+
+
+
+% ./cvp -v compute_int_0 > realvp.out
+
+100000 instrs 
+200000 instrs 
+300000 instrs 
+...
+30000000 instrs 
+UARCHSIM CONFIGURATION-----------------------------
+VP_ENABLE = 1
+VP_PERFECT = 0
+WINDOW_SIZE = 256
+FETCH_WIDTH = 16
+MEMORY HIERARCHY CONFIGURATION---------------------
+PERFECT_CACHE = 0
+WRITE_ALLOCATE = 1
+Within-pipeline factors:
+	AGEN latency = 1 cycle
+	Store Queue (SQ): SQ size = window size, oracle memory disambiguation, store-load forwarding = 1 cycle after store's or load's agen.
+	* Note: A store searches the L1$ at commit. The store is released
+	* from the SQ and window, whether it hits or misses. Store misses
+	* are buffered until the block is allocated and the store is
+	* performed in the L1$. While buffered, conflicting loads get
+	* the store's data as they would from the SQ.
+L1$: 32 KB, 4-way set-assoc., 64B block size, 2-cycle search latency
+L2$: 1 MB, 8-way set-assoc., 64B block size, 12-cycle search latency
+L3$: 8 MB, 16-way set-assoc., 128B block size, 60-cycle search latency
+Main Memory: 150-cycle fixed search time
+STORE QUEUE MEASUREMENTS---------------------------
+Number of loads: 8376300
+Number of loads that miss in SQ: 8349346 (99.68%)
+MEMORY HIERARCHY MEASUREMENTS----------------------
+L1$:
+	accesses   = 12940396
+	misses     = 150886
+	miss ratio = 1.17%
+L2$:
+	accesses   = 150886
+	misses     = 54365
+	miss ratio = 36.03%
+L3$:
+	accesses   = 54365
+	misses     = 10325
+	miss ratio = 18.99%
+ILP LIMIT STUDY------------------------------------
+instructions = 30700423
+cycles       = 39422659
+IPC          = 0.78
+CVP STUDY------------------------------------------
+prediction-eligible instructions = 20379268
+correct predictions              = 109351 (0.54%)
+incorrect predictions            = 20269917 (99.46%)
+Read 30003200 instrs 
